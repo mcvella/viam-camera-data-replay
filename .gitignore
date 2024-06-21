@@ -162,3 +162,5 @@ cython_debug/
 #.idea/
 
 module.tar.gz
+viam-env
+.installed

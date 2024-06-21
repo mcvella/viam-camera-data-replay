@@ -1,4 +1,4 @@
-from typing import ClassVar, Mapping, Sequence, Any, Dict, Optional, Tuple, Final, List, cast
+from typing import ClassVar, Mapping, Sequence, Any, Dict, Optional, Tuple, NamedTuple, List, cast
 from typing_extensions import Self
 
 import sys
@@ -23,35 +23,34 @@ from viam.proto.common import ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
 from viam.proto.app.data import Filter
+from viam.proto.app.data import BinaryID
 
 from viam.components.camera import Camera
 from viam.logging import getLogger
 
-import time
-import asyncio
+from PIL import Image
+from io import BytesIO
 
 LOGGER = getLogger(__name__)
 
 class dataReplay(Camera, Reconfigurable):
     
-    """
-    Camera represents any physical hardware that can capture frames.
-    """
-    Properties: "TypeAlias" = GetPropertiesResponse
+    class Properties(NamedTuple):
+        supports_pcd: bool = False
+        intrinsic_parameters = None
+        distortion_parameters = None
     
 
     MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "camera"), "data-replay")
     
+    camera_properties: Camera.Properties = Properties()
     app_client : None
     api_key_id: str
     api_key: str
-    part_id: str
-    location_id: str
-    org_id: str
     dataset_name: str = ""
     dataset_id: str = ""
     binary_ids: dict
-    image_index = dict
+    image_index: dict
 
     # Constructor
     @classmethod
@@ -63,14 +62,32 @@ class dataReplay(Camera, Reconfigurable):
     # Validates JSON Configuration
     @classmethod
     def validate(cls, config: ComponentConfig):
+        api_key = config.attributes.fields["app_api_key"].string_value
+        if api_key == "":
+            raise Exception("app_api_key attribute is required")
+        api_key_id = config.attributes.fields["app_api_key_id"].string_value
+        if api_key_id == "":
+            raise Exception("app_api_key_id attribute is required")
+        dataset_id = config.attributes.fields["default_dataset_id"].string_value
+        if dataset_id == "":
+            raise Exception("default_dataset_id attribute is required")
         return
 
     # Handles attribute reconfiguration
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
+        self.image_index = {}
+        self.binary_ids = {}
+        self.dataset_id = config.attributes.fields["default_dataset_id"].string_value or ""
+        self.api_key = config.attributes.fields["app_api_key"].string_value
+        self.api_key_id = config.attributes.fields["app_api_key_id"].string_value
         return
-
-    """ Implement the methods the Viam RDK defines for the Camera API (rdk:component:camera) """
-
+    
+    async def viam_connect(self) -> ViamClient:
+        dial_options = DialOptions.with_api_key( 
+            api_key=self.api_key,
+            api_key_id=self.api_key_id
+        )
+        return await ViamClient.create_from_dial_options(dial_options)
     
     async def get_image(
         self, mime_type: str = "", *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None, **kwargs
@@ -82,101 +99,52 @@ class dataReplay(Camera, Reconfigurable):
         dataset_id = self.dataset_id
         if extra != None and extra.get('dataset_id') != None:
             dataset_id = extra['dataset_id']
-        if not hasattr(self.binary_ids[dataset_id]):
+        if not dataset_id in self.binary_ids:
+            self.binary_ids[dataset_id] = []
             filter = Filter(dataset_id=dataset_id)
-            self.binary_ids[dataset_id] = self.app_client.data_client.binary_data_by_filter(filter, include_binary_data=False)
+            done = False
+            binary_args = {'filter': filter, 'include_binary_data': False}
+            while not done:
+                LOGGER.error(binary_args)
+                binary_ids = await self.app_client.data_client.binary_data_by_filter(**binary_args)
+                LOGGER.error(len(binary_ids[0]))
+                if len(binary_ids[0]):
+                    self.binary_ids[dataset_id].extend(binary_ids[0])
+                    binary_args['last'] = binary_ids[0][len(binary_ids[0])-1].metadata.id
+                else:
+                    done = True
 
-        if not hasattr(self.image_index[dataset_id]):
+        if not dataset_id in self.image_index:
             self.image_index[dataset_id] = 0
-            
-        """Get the next image from the camera as a ViamImage.
-        Be sure to close the image when finished.
+            LOGGER.error("reset image index")
+        
+        LOGGER.error(self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata)
+        binary_id = BinaryID(
+            file_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.id,
+            organization_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.capture_metadata.organization_id,
+            location_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.capture_metadata.location_id
+        )
 
-        NOTE: If the mime type is ``image/vnd.viam.dep`` you can use :func:`viam.media.video.ViamImage.bytes_to_depth_array`
-        to convert the data to a standard representation.
-
-        ::
-
-            my_camera = Camera.from_robot(robot=robot, name="my_camera")
-
-            # Assume "frame" has a mime_type of "image/vnd.viam.dep"
-            frame = await my_camera.get_image(mime_type = CameraMimeType.VIAM_RAW_DEPTH)
-
-            # Convert "frame" to a standard 2D image representation.
-            # Remove the 1st 3x8 bytes and reshape the raw bytes to List[List[Int]].
-            standard_frame = frame.bytes_to_depth_array()
-
-        Args:
-            mime_type (str): The desired mime type of the image. This does not guarantee output type
-
-        Returns:
-            ViamImage: The frame
-        """
-        ...
-
+        self.image_index[dataset_id] = self.image_index[dataset_id] + 1
+        if (self.image_index[dataset_id] >= len(self.binary_ids[dataset_id])):
+            self.image_index[dataset_id] = 0
+        
+        binary_data = await self.app_client.data_client.binary_data_by_ids(binary_ids=[binary_id])
+        img = Image.open(BytesIO(binary_data[0].binary))
+        return pil_to_viam_image(img.convert('RGB'), CameraMimeType.JPEG)
     
     async def get_images(self, *, timeout: Optional[float] = None, **kwargs) -> Tuple[List[NamedImage], ResponseMetadata]:
-        """Get simultaneous images from different imagers, along with associated metadata.
-        This should not be used for getting a time series of images from the same imager.
+        raise NotImplementedError()
 
-        ::
-
-            my_camera = Camera.from_robot(robot=robot, name="my_camera")
-
-            images, metadata = await my_camera.get_images()
-            img0 = images[0].image
-            timestamp = metadata.captured_at
-
-        Returns:
-            Tuple[List[NamedImage], ResponseMetadata]: A tuple containing two values; the first [0] a list of images returned from the
-                camera system, and the second [1] the metadata associated with this response.
-        """
-        ...
 
     
     async def get_point_cloud(
         self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> Tuple[bytes, str]:
-        """
-        Get the next point cloud from the camera. This will be
-        returned as bytes with a mimetype describing
-        the structure of the data. The consumer of this call
-        should encode the bytes into the formatted suggested
-        by the mimetype.
-
-        To deserialize the returned information into a numpy array, use the Open3D library.
-        ::
-
-            import numpy as np
-            import open3d as o3d
-
-            data, _ = await camera.get_point_cloud()
-
-            # write the point cloud into a temporary file
-            with open("/tmp/pointcloud_data.pcd", "wb") as f:
-                f.write(data)
-            pcd = o3d.io.read_point_cloud("/tmp/pointcloud_data.pcd")
-            points = np.asarray(pcd.points)
-
-        Returns:
-            Tuple[bytes, str]: A tuple containing two values; the first [0] the pointcloud data, and the second [1] the mimetype of the
-                pointcloud (e.g. PCD).
-        """
-        ...
+        raise NotImplementedError()
 
     
     async def get_properties(self, *, timeout: Optional[float] = None, **kwargs) -> Properties:
-        """
-        Get the camera intrinsic parameters and camera distortion parameters
+        return self.camera_properties
 
-        ::
-
-            my_camera = Camera.from_robot(robot=robot, name="my_camera")
-
-            properties = await my_camera.get_properties()
-
-        Returns:
-            Properties: The properties of the camera
-        """
-        ...
 
