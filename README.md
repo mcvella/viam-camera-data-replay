@@ -1,65 +1,55 @@
-# data-replay modular resource
+# data-replay camera modular service
 
-This module implements the [rdk camera API](https://github.com/rdk/camera-api) in a mcvella:camera:data-replay model.
-With this model, you can...
+*data-replay* is a Viam modular service that provides camera capabilities, returning images from a [Viam dataset](https://docs.viam.com/tutorials/services/data-mlmodel-tutorial/#tag-images-and-create-a-dataset) based on a dataset ID.
 
-## Requirements
+The model this module makes available is *mcvella:camera:data-replay*
 
-_Add instructions here for any requirements._
+## Prerequisites
 
-``` bash
+You must have created a dataset using [Viam Data Management](https://docs.viam.com/tutorials/services/data-mlmodel-tutorial/#the-data-management-service)
+
+## API
+
+The data-replay resource implements the [RDK camera API](https://github.com/rdk/camera-api), specifically get_image().
+
+### get_image
+
+On each get_image() call, the next image from the dataset (default search order) will be returned.
+After the last image is returned, the next get_image() call will return the first image from the dataset.
+Note that currently, the module must be reconfigured or restarted in order for the images in the dataset to be re-loaded.
+
+The following can be passed via the *get_image()* extra parameter:
+
+#### dataset_id (string)
+
+The dataset_id to return images from.
+This overrides the default_dataset_id.
+
+Example:
+
+```python
+camera.get_image() # returns the next image from the dataset specified via config default_dataset_id
+camera.get_image(extra={"dataset_id":"mydatasetid123"}) # returns the next image from the dataset id "mydatasetid123"
 ```
 
-## Build and run
+## Viam Service Configuration
 
-To use this module, follow the instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `rdk:camera:mcvella:camera:data-replay` model from the [`mcvella:camera:data-replay` module](https://app.viam.com/module/rdk/mcvella:camera:data-replay).
-
-## Configure your camera
-
-> [!NOTE]  
-> Before configuring your camera, you must [create a machine](https://docs.viam.com/manage/fleet/machines/#add-a-new-machine).
-
-Navigate to the **Config** tab of your machine's page in [the Viam app](https://app.viam.com/).
-Click on the **Components** subtab and click **Create component**.
-Select the `camera` type, then select the `mcvella:camera:data-replay` model.
-Click **Add module**, then enter a name for your camera and click **Create**.
-
-On the new component panel, copy and paste the following attribute template into your camera’s **Attributes** box:
+Example attribute configuration:
 
 ```json
 {
-  TODO: INSERT SAMPLE ATTRIBUTES
+    "default_dataset_id": "mydatasetid123",
+    "app_api_key_id": "xyz123",
+    "app_api_key": "keyid"
 }
 ```
-
-> [!NOTE]  
-> For more information, see [Configure a Machine](https://docs.viam.com/manage/configuration/).
 
 ### Attributes
 
-The following attributes are available for `rdk:camera:mcvella:camera:data-replay` cameras:
+The following attributes are available for `mcvella:camera:data-replay` model:
 
 | Name | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
-| `todo1` | string | **Required** |  TODO |
-| `todo2` | string | Optional |  TODO |
-
-### Example configuration
-
-```json
-{
-  TODO: INSERT SAMPLE CONFIGURATION(S)
-}
-```
-
-### Next steps
-
-_Add any additional information you want readers to know and direct them towards what to do next with this module._
-_For example:_ 
-
-- To test your...
-- To write code against your...
-
-## Troubleshooting
-
-_Add troubleshooting notes here._
+| `default_dataset_id` | string | **Required** |  Default dataset ID. Can be overridden via extra params on get_image() calls. |
+| `app_api_key_id` | string | **Required** |  Viam app key id. Required in order to read from Viam datasets. |
+| `app_api_key` | string | **Required** |  Viam app key. Required in order to read from Viam datasets. |

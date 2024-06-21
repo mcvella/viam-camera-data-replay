@@ -105,20 +105,16 @@ class dataReplay(Camera, Reconfigurable):
             done = False
             binary_args = {'filter': filter, 'include_binary_data': False}
             while not done:
-                LOGGER.error(binary_args)
                 binary_ids = await self.app_client.data_client.binary_data_by_filter(**binary_args)
-                LOGGER.error(len(binary_ids[0]))
                 if len(binary_ids[0]):
                     self.binary_ids[dataset_id].extend(binary_ids[0])
-                    binary_args['last'] = binary_ids[0][len(binary_ids[0])-1].metadata.id
+                    binary_args['last'] = binary_ids[2]
                 else:
                     done = True
 
         if not dataset_id in self.image_index:
             self.image_index[dataset_id] = 0
-            LOGGER.error("reset image index")
         
-        LOGGER.error(self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata)
         binary_id = BinaryID(
             file_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.id,
             organization_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.capture_metadata.organization_id,
