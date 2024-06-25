@@ -39,6 +39,7 @@ class dataReplay(Camera, Reconfigurable):
         supports_pcd: bool = False
         intrinsic_parameters = None
         distortion_parameters = None
+        mime_types = [CameraMimeType.JPEG]
     
 
     MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "camera"), "data-replay")
