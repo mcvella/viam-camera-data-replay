@@ -22,7 +22,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
-from viam.proto.app.data import Filter
+from viam.proto.app.data import Filter, TagsFilter
 from viam.proto.app.data import BinaryID
 
 from viam.components.camera import Camera
@@ -50,6 +50,8 @@ class dataReplay(Camera, Reconfigurable):
     api_key: str
     dataset_name: str = ""
     dataset_id: str = ""
+    tags: list = []
+    labels: list = []
     binary_ids: dict
     image_index: dict
 
@@ -69,9 +71,6 @@ class dataReplay(Camera, Reconfigurable):
         api_key_id = config.attributes.fields["app_api_key_id"].string_value
         if api_key_id == "":
             raise Exception("app_api_key_id attribute is required")
-        dataset_id = config.attributes.fields["default_dataset_id"].string_value
-        if dataset_id == "":
-            raise Exception("default_dataset_id attribute is required")
         return
 
     # Handles attribute reconfiguration
@@ -79,6 +78,8 @@ class dataReplay(Camera, Reconfigurable):
         self.image_index = {}
         self.binary_ids = {}
         self.dataset_id = config.attributes.fields["default_dataset_id"].string_value or ""
+        self.tags = config.attributes.fields["default_tags"].list_value or []
+        self.labels = config.attributes.fields["default_labels"].list_value or []
         self.api_key = config.attributes.fields["app_api_key"].string_value
         self.api_key_id = config.attributes.fields["app_api_key_id"].string_value
         return
@@ -90,6 +91,56 @@ class dataReplay(Camera, Reconfigurable):
         )
         return await ViamClient.create_from_dial_options(dial_options)
     
+    def filter_id(self, dataset_id, tags, labels):
+        return dataset_id + '---' + ' '.join(tags) + ' '.join(labels)
+
+    async def get_binary_ids(self, dataset_id, tags, labels):
+        filter_id = self.filter_id(dataset_id, tags, labels)
+
+        if not filter_id in self.binary_ids:
+            # lookup ids from data management
+            self.binary_ids[filter_id] = []
+
+            filter_args = {}
+            if dataset_id != "":
+                filter_args['dataset_id'] = dataset_id
+            if len(tags) > 0:
+                filter_args['tags_filter'] =  TagsFilter(tags=tags)
+            filter = Filter(**filter_args)
+            if len(labels) > 0:
+                filter_args['bbox_labels'] = labels
+            filter = Filter(**filter_args)
+
+            binary_args = {'filter': filter, 'include_binary_data': False}
+            # we need to page through results
+            done = False
+            while not done:
+                binary_ids = await self.app_client.data_client.binary_data_by_filter(**binary_args)
+                if len(binary_ids[0]):
+                    self.binary_ids[filter_id].extend(binary_ids[0])
+                    binary_args['last'] = binary_ids[2]
+                else:
+                    done = True
+        return self.binary_ids[filter_id]
+
+    async def get_next_binary_image(self, dataset_id, tags, labels, binary_ids) -> Image:
+        filter_id = self.filter_id(dataset_id, tags, labels)
+        if not filter_id in self.image_index:
+            self.image_index[filter_id] = 0
+        
+        binary_id = BinaryID(
+            file_id = binary_ids[self.image_index[filter_id]].metadata.id,
+            organization_id = binary_ids[self.image_index[filter_id]].metadata.capture_metadata.organization_id,
+            location_id = binary_ids[self.image_index[filter_id]].metadata.capture_metadata.location_id
+        )
+
+        self.image_index[filter_id] = self.image_index[filter_id] + 1
+        if (self.image_index[filter_id] >= len(binary_ids)):
+            self.image_index[filter_id] = 0
+        
+        binary_data = await self.app_client.data_client.binary_data_by_ids(binary_ids=[binary_id])
+        return Image.open(BytesIO(binary_data[0].binary))
+
     async def get_image(
         self, mime_type: str = "", *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> ViamImage:
@@ -100,47 +151,26 @@ class dataReplay(Camera, Reconfigurable):
         dataset_id = self.dataset_id
         if extra != None and extra.get('dataset_id') != None:
             dataset_id = extra['dataset_id']
-        if not dataset_id in self.binary_ids:
-            self.binary_ids[dataset_id] = []
-            filter = Filter(dataset_id=dataset_id)
-            done = False
-            binary_args = {'filter': filter, 'include_binary_data': False}
-            while not done:
-                binary_ids = await self.app_client.data_client.binary_data_by_filter(**binary_args)
-                if len(binary_ids[0]):
-                    self.binary_ids[dataset_id].extend(binary_ids[0])
-                    binary_args['last'] = binary_ids[2]
-                else:
-                    done = True
+        tags = self.tags
+        if extra != None and extra.get('tags') != None:
+            tags = extra['tags']
+        labels = self.labels
+        if extra != None and extra.get('labels') != None:
+            labels = extra['labels']
 
-        if not dataset_id in self.image_index:
-            self.image_index[dataset_id] = 0
-        
-        binary_id = BinaryID(
-            file_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.id,
-            organization_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.capture_metadata.organization_id,
-            location_id = self.binary_ids[dataset_id][self.image_index[dataset_id]].metadata.capture_metadata.location_id
-        )
+        binary_ids = await self.get_binary_ids(dataset_id, tags, labels)
+        img = await self.get_next_binary_image(dataset_id, tags, labels, binary_ids)
 
-        self.image_index[dataset_id] = self.image_index[dataset_id] + 1
-        if (self.image_index[dataset_id] >= len(self.binary_ids[dataset_id])):
-            self.image_index[dataset_id] = 0
-        
-        binary_data = await self.app_client.data_client.binary_data_by_ids(binary_ids=[binary_id])
-        img = Image.open(BytesIO(binary_data[0].binary))
         return pil_to_viam_image(img.convert('RGB'), CameraMimeType.JPEG)
     
     async def get_images(self, *, timeout: Optional[float] = None, **kwargs) -> Tuple[List[NamedImage], ResponseMetadata]:
         raise NotImplementedError()
 
-
-    
     async def get_point_cloud(
         self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> Tuple[bytes, str]:
         raise NotImplementedError()
 
-    
     async def get_properties(self, *, timeout: Optional[float] = None, **kwargs) -> Properties:
         return self.camera_properties
 
